@@ -77,14 +77,14 @@ install_pkgs() {
     debian|ubuntu)
       apt-get update
       DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        sudo git curl zsh tmux vim openssl ca-certificates fzf
+        sudo git curl wget zsh tmux vim openssl ca-certificates fzf
       SSH_SERVICE="ssh"
       SUDO_GROUP="sudo"
       ;;
     opensuse*|sles|sled)
       zypper --non-interactive refresh
       zypper --non-interactive install \
-        sudo git curl zsh tmux vim openssl ca-certificates fzf
+        sudo git curl wget zsh tmux vim openssl ca-certificates fzf
       SSH_SERVICE="sshd"
       SUDO_GROUP="wheel"
       ;;
@@ -92,7 +92,7 @@ install_pkgs() {
       # FIX: drop `-a` (interactive ask) so it does not block automation.
       emerge --sync || true
       emerge --noreplace --quiet \
-        app-admin/sudo dev-vcs/git net-misc/curl app-shells/zsh \
+        app-admin/sudo dev-vcs/git net-misc/curl net-misc/wget app-shells/zsh \
         app-misc/tmux app-editors/vim dev-libs/openssl app-shells/fzf
       SSH_SERVICE="sshd"
       SUDO_GROUP="wheel"
@@ -327,12 +327,20 @@ chown "$ADMIN_USER:$ADMIN_USER" "/home/$ADMIN_USER/.zshrc" "/home/$ADMIN_USER/.t
 # FIX 2: run the block under ZSH, not bash — antidote is zsh code and cannot
 #        be sourced/run from bash, so the pre-built bundle never generated.
 sudo -u "$ADMIN_USER" -H "$ZSH_BIN" <<'USERSETUP' || \
-  echo "WARNING: zsh plugin setup incomplete (check network). Shell still works; run 'zsh-update-plugins' later."
+  echo "WARNING: zsh plugin setup incomplete (check network). Shell still works; re-run zsh-setup.sh later — see README."
 set -u
 mkdir -p "$HOME/.cache/zsh" "$HOME/.zsh/plugins"
 
-git clone --depth=1 https://github.com/mattmc3/antidote.git "$HOME/.antidote" 2>/dev/null || true
-git clone --depth=1 https://github.com/zsh-users/zsh-completions "$HOME/.zsh/plugins/zsh-completions" 2>/dev/null || true
+clone_or_pull() {  # <url> <dest>
+  if [[ -d "$2/.git" ]]; then
+    git -C "$2" pull --ff-only 2>/dev/null || true
+  else
+    rm -rf "$2"
+    git clone --depth=1 "$1" "$2"
+  fi
+}
+clone_or_pull https://github.com/mattmc3/antidote.git          "$HOME/.antidote" || exit 1
+clone_or_pull https://github.com/zsh-users/zsh-completions.git "$HOME/.zsh/plugins/zsh-completions" || true
 
 cat > "$HOME/.zsh_plugins.txt" <<'PLUGINS'
 romkatv/powerlevel10k
@@ -340,10 +348,11 @@ Aloxaf/fzf-tab
 zsh-users/zsh-autosuggestions
 PLUGINS
 
-if [[ -f "$HOME/.antidote/antidote.zsh" ]]; then
-  source "$HOME/.antidote/antidote.zsh"
-  antidote bundle < "$HOME/.zsh_plugins.txt" > "$HOME/.cache/zsh/antidote.zsh"
-fi
+source "$HOME/.antidote/antidote.zsh"
+antidote bundle < "$HOME/.zsh_plugins.txt" > "$HOME/.cache/zsh/antidote.zsh"
+
+# FIX: verify the bundle is non-empty (was silently skipped before -> bare prompt).
+[[ -s "$HOME/.cache/zsh/antidote.zsh" ]]
 USERSETUP
 
 # --- enable + (re)start SSH, init-system aware ---

@@ -9,8 +9,16 @@
 > ⚠️ 跑之前,先確認你**目前登入的使用者** `~/.ssh/authorized_keys` 已經有公鑰。
 > 腳本會把這把金鑰裝到新帳號;**找不到金鑰就會中止**(避免關掉密碼登入後把自己鎖在外面)。
 
+curl:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Zakkaus/vps/main/vps-bootstrap.sh | sudo bash
+```
+
+wget:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/Zakkaus/vps/main/vps-bootstrap.sh | sudo bash
 ```
 
 ## 自訂參數
@@ -37,6 +45,24 @@ curl -fsSL https://raw.githubusercontent.com/Zakkaus/vps/main/vps-bootstrap.sh \
 - SSH 加固:改 port、`PasswordAuthentication no`、`PermitRootLogin prohibit-password`,並處理 Debian/Ubuntu 的 `ssh.socket` socket activation
 - 寫入 `.tmux.conf`(prefix 改 `C-a`、滑鼠、vi copy mode、好看的狀態列)
 - 寫入 `.zshrc` 並裝好 antidote + powerlevel10k + fzf-tab + autosuggestions
+
+## 只修 zsh(提示字元變回 `localhost%` 時)
+
+如果登入後提示字元是裸的 `localhost%` 而不是 powerlevel10k,代表 antidote bundle 沒生成(裝外掛當下網路有問題)。**用你的一般帳號**(不是 root)單獨重跑這支即可,它是冪等的、不碰 SSH:
+
+curl:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Zakkaus/vps/main/zsh-setup.sh | bash && exec zsh
+```
+
+wget:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/Zakkaus/vps/main/zsh-setup.sh | bash && exec zsh
+```
+
+跑完執行 `p10k configure` 設定提示字元外觀。
 
 ## 完成後務必驗證
 
