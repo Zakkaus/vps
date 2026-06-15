@@ -38,6 +38,33 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
+# --- SAFETY: refuse to run at all without a usable SSH public key. ---
+# This check runs FIRST — before installing packages, creating users, or
+# touching any config — so an abort here leaves the system 100% unchanged.
+valid_authkeys() {  # <file>  -> 0 if it holds at least one usable public key
+  local f="$1"
+  [[ -f "$f" && -s "$f" ]] || return 1
+  # Authoritative check if available: ssh-keygen lists fingerprints of valid keys.
+  if command -v ssh-keygen >/dev/null 2>&1 && ssh-keygen -l -f "$f" >/dev/null 2>&1; then
+    return 0
+  fi
+  # Fallback: match a real key-type token (allows an options prefix), then a blob.
+  grep -Eq '(^|[[:space:]])(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)[[:space:]]+[A-Za-z0-9+/]' "$f"
+}
+
+if ! valid_authkeys "$SRC_AUTH_KEYS"; then
+  echo "ERROR: no usable SSH public key found at: $SRC_AUTH_KEYS" >&2
+  echo "This script disables password SSH login, so it will NOT run without a key" >&2
+  echo "(continuing could lock you out). NOTHING has been changed on this system." >&2
+  echo >&2
+  echo "Fix one of:" >&2
+  echo "  - add your public key, e.g.:" >&2
+  echo "      install -d -m700 ~/.ssh && curl -fsSL https://github.com/<you>.keys >> ~/.ssh/authorized_keys" >&2
+  echo "  - or point the script at an existing keys file:" >&2
+  echo "      curl -fsSL .../vps-bootstrap.sh | sudo SRC_AUTH_KEYS=/path/to/authorized_keys bash" >&2
+  exit 1
+fi
+
 source /etc/os-release 2>/dev/null || true
 OS_ID="${ID:-unknown}"
 
@@ -131,17 +158,14 @@ fi
 # --- SSH keys (with lockout guard) ---
 install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "/home/$ADMIN_USER/.ssh"
 
-if [[ -f "$SRC_AUTH_KEYS" && -s "$SRC_AUTH_KEYS" ]]; then
+if valid_authkeys "$SRC_AUTH_KEYS"; then
   install -m 600 -o "$ADMIN_USER" -g "$ADMIN_USER" \
     "$SRC_AUTH_KEYS" "/home/$ADMIN_USER/.ssh/authorized_keys"
   echo "Installed authorized_keys from: $SRC_AUTH_KEYS"
 else
-  # FIX: original silently created an empty authorized_keys, then disabled
-  # password auth -> instant lockout. Abort before touching sshd config.
-  echo "ERROR: no SSH public key found at: $SRC_AUTH_KEYS" >&2
-  echo "Refusing to disable password auth (that would lock you out)." >&2
-  echo "Fix: SRC_AUTH_KEYS=/path/to/authorized_keys ./vps-bootstrap.sh" >&2
-  echo "(SSH config is untouched, so your current login still works.)" >&2
+  # Defense-in-depth: the early preflight already guarantees a key, but never
+  # disable password auth without one — that is an instant lockout.
+  echo "ERROR: no usable SSH public key at: $SRC_AUTH_KEYS — aborting before sshd changes." >&2
   exit 1
 fi
 
@@ -194,7 +218,13 @@ PermitRootLogin prohibit-password
 UsePAM yes
 SSHEOF
 
-sshd -t
+# If the resulting config is invalid, remove our drop-in so we never leave a
+# broken sshd that would fail to start on the next restart or reboot.
+if ! sshd -t; then
+  echo "ERROR: sshd config test failed; removing our drop-in and aborting." >&2
+  rm -f /etc/ssh/sshd_config.d/99-bootstrap-security.conf
+  exit 1
+fi
 
 # --- tmux config ---
 cat > "/home/$ADMIN_USER/.tmux.conf" <<'TMUXEOF'
