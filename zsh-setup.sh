@@ -47,8 +47,11 @@ clone_or_pull https://github.com/zsh-users/zsh-completions.git "$HOME/.zsh/plugi
 
 cat > "$HOME/.zsh_plugins.txt" <<'PLUGINS'
 romkatv/powerlevel10k
+zsh-users/zsh-completions
 Aloxaf/fzf-tab
 zsh-users/zsh-autosuggestions
+zdharma-continuum/fast-syntax-highlighting
+zsh-users/zsh-history-substring-search
 PLUGINS
 
 echo "== building antidote bundle (downloads plugins, needs network) =="

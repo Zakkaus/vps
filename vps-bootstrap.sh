@@ -8,10 +8,14 @@ set -euo pipefail
 #   Usage: curl -fsSL https://raw.githubusercontent.com/Zakkaus/vps/main/vps-bootstrap.sh | sudo bash
 #
 #   Optional overrides (export, or prefix with `sudo VAR=... bash`):
-#     SSH_PORT        SSH listen port              (default: 61000)
-#     ADMIN_USER      admin account name           (default: admin<random>)
-#     ADMIN_PASS      admin password               (default: random)
-#     SRC_AUTH_KEYS   path to authorized_keys      (default: invoking user's)
+#     SSH_PORT          SSH listen port            (default: 61000)
+#     ADMIN_USER        admin account name         (default: admin<random>)
+#     ADMIN_PASS        admin password             (default: random)
+#     SSH_PUBKEY        public key text, inline    ("ssh-ed25519 AAAA... you")
+#     PUBKEY_URL        URL to fetch keys from     (https://github.com/<you>.keys)
+#     SRC_AUTH_KEYS     path to an authorized_keys (default: invoking user's)
+#     HARDEN_SSH        extra sshd hardening, 1/0  (default: 1)
+#     INSTALL_FAIL2BAN  install + enable fail2ban  (default: 1)
 #
 # Supports: Debian/Ubuntu (systemd), openSUSE/SLES (systemd),
 #           Gentoo (OpenRC or systemd)
@@ -21,11 +25,35 @@ SSH_PORT="${SSH_PORT:-61000}"
 # Defaults for user/pass are generated AFTER package install (we may need a RNG).
 ADMIN_USER="${ADMIN_USER:-}"
 ADMIN_PASS="${ADMIN_PASS:-}"
+HARDEN_SSH="${HARDEN_SSH:-1}"
+INSTALL_FAIL2BAN="${INSTALL_FAIL2BAN:-1}"
 
-# --- FIX: resolve the *invoking* user's authorized_keys, not root's. ---
-# When run via `sudo`, $HOME may be /root with no keys -> would lock you out.
-if [[ -n "${SRC_AUTH_KEYS:-}" ]]; then
-  :  # explicit override, keep as given
+# --- Resolve which public key(s) to install, in priority order: ---
+#   1) SSH_PUBKEY    — literal key text passed inline
+#   2) PUBKEY_URL    — fetch keys from a URL (e.g. https://github.com/<you>.keys)
+#   3) SRC_AUTH_KEYS — explicit path to an authorized_keys file
+#   4) the *invoking* user's ~/.ssh/authorized_keys (sudo) — NOT root's
+#   5) root's ~/.ssh/authorized_keys
+# (4) avoids the classic lockout: under sudo $HOME may be /root with no keys.
+_TMP_KEYS=""
+cleanup() { [[ -n "$_TMP_KEYS" ]] && rm -f "$_TMP_KEYS"; }
+trap cleanup EXIT
+
+if [[ -n "${SSH_PUBKEY:-}" ]]; then
+  _TMP_KEYS="$(mktemp)"; printf '%s\n' "$SSH_PUBKEY" > "$_TMP_KEYS"
+  SRC_AUTH_KEYS="$_TMP_KEYS"
+elif [[ -n "${PUBKEY_URL:-}" ]]; then
+  _TMP_KEYS="$(mktemp)"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$PUBKEY_URL" -o "$_TMP_KEYS" || { echo "ERROR: failed to fetch PUBKEY_URL: $PUBKEY_URL" >&2; exit 1; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$_TMP_KEYS" "$PUBKEY_URL" || { echo "ERROR: failed to fetch PUBKEY_URL: $PUBKEY_URL" >&2; exit 1; }
+  else
+    echo "ERROR: need curl or wget to fetch PUBKEY_URL." >&2; exit 1
+  fi
+  SRC_AUTH_KEYS="$_TMP_KEYS"
+elif [[ -n "${SRC_AUTH_KEYS:-}" ]]; then
+  :  # explicit path override, keep as given
 elif [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
   _inv_home="$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)"
   SRC_AUTH_KEYS="${_inv_home:-$HOME}/.ssh/authorized_keys"
@@ -50,6 +78,19 @@ valid_authkeys() {  # <file>  -> 0 if it holds at least one usable public key
   fi
   # Fallback: match a real key-type token (allows an options prefix), then a blob.
   grep -Eq '(^|[[:space:]])(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)[[:space:]]+[A-Za-z0-9+/]' "$f"
+}
+
+# Intersect a desired CSV of algorithms with what THIS sshd actually supports,
+# so the hardened crypto lines can never make `sshd -t` fail. Empty if unknown.
+filter_algos() {  # <ssh -Q type> <comma-list>
+  local type="$1" want="$2" supported a out=""
+  supported="$(ssh -Q "$type" 2>/dev/null)" || return 0
+  local oldIFS="$IFS"; IFS=','
+  for a in $want; do
+    printf '%s\n' "$supported" | grep -qxF "$a" && out="${out:+$out,}$a"
+  done
+  IFS="$oldIFS"
+  printf '%s' "$out"
 }
 
 if ! valid_authkeys "$SRC_AUTH_KEYS"; then
@@ -100,27 +141,31 @@ gen_pass() {
 }
 
 install_pkgs() {
+  local extra=()  # fail2ban (+ nftables for its ban backend), if enabled
   case "$OS_ID" in
     debian|ubuntu)
+      [[ "$INSTALL_FAIL2BAN" == 1 ]] && extra+=(fail2ban nftables)
       apt-get update
       DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        sudo git curl wget zsh tmux vim openssl ca-certificates fzf
+        sudo git curl wget zsh tmux vim openssl ca-certificates fzf "${extra[@]}"
       SSH_SERVICE="ssh"
       SUDO_GROUP="sudo"
       ;;
     opensuse*|sles|sled)
+      [[ "$INSTALL_FAIL2BAN" == 1 ]] && extra+=(fail2ban nftables)
       zypper --non-interactive refresh
       zypper --non-interactive install \
-        sudo git curl wget zsh tmux vim openssl ca-certificates fzf
+        sudo git curl wget zsh tmux vim openssl ca-certificates fzf "${extra[@]}"
       SSH_SERVICE="sshd"
       SUDO_GROUP="wheel"
       ;;
     gentoo)
+      [[ "$INSTALL_FAIL2BAN" == 1 ]] && extra+=(net-analyzer/fail2ban net-firewall/nftables)
       # FIX: drop `-a` (interactive ask) so it does not block automation.
       emerge --sync || true
       emerge --noreplace --quiet \
         app-admin/sudo dev-vcs/git net-misc/curl net-misc/wget app-shells/zsh \
-        app-misc/tmux app-editors/vim dev-libs/openssl app-shells/fzf
+        app-misc/tmux app-editors/vim dev-libs/openssl app-shells/fzf "${extra[@]}"
       SSH_SERVICE="sshd"
       SUDO_GROUP="wheel"
       ;;
@@ -208,7 +253,9 @@ if [[ -f "$SSHD_MAIN" ]] && \
   rm -f "$SSHD_MAIN.new"
 fi
 
-cat > /etc/ssh/sshd_config.d/99-bootstrap-security.conf <<SSHEOF
+{
+  cat <<SSHEOF
+# Managed by vps-bootstrap — https://github.com/Zakkaus/vps
 Port ${SSH_PORT}
 PubkeyAuthentication yes
 PasswordAuthentication no
@@ -217,6 +264,29 @@ ChallengeResponseAuthentication no
 PermitRootLogin prohibit-password
 UsePAM yes
 SSHEOF
+
+  if [[ "$HARDEN_SSH" == 1 ]]; then
+    cat <<SSHEOF
+AuthenticationMethods publickey
+PermitEmptyPasswords no
+MaxAuthTries 3
+LoginGraceTime 20
+ClientAliveInterval 300
+ClientAliveCountMax 2
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+AllowUsers ${ADMIN_USER}
+SSHEOF
+    # Strong crypto, but ONLY algorithms this sshd supports (else sshd -t fails).
+    _kex="$(filter_algos kex    'sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512')"
+    _cip="$(filter_algos cipher 'chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr')"
+    _mac="$(filter_algos mac    'hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com')"
+    [[ -n "$_kex" ]] && echo "KexAlgorithms $_kex"
+    [[ -n "$_cip" ]] && echo "Ciphers $_cip"
+    [[ -n "$_mac" ]] && echo "MACs $_mac"
+  fi
+} > /etc/ssh/sshd_config.d/99-bootstrap-security.conf
 
 # If the resulting config is invalid, remove our drop-in so we never leave a
 # broken sshd that would fail to start on the next restart or reboot.
@@ -325,6 +395,14 @@ bindkey '^U' backward-kill-line
 bindkey '^K' kill-line
 bindkey '^R' history-incremental-search-backward
 
+# history-substring-search (plugin): up/down & ^P/^N search by what you've typed
+if (( $+widgets[history-substring-search-up] )); then
+  bindkey '^[[A' history-substring-search-up
+  bindkey '^[[B' history-substring-search-down
+  bindkey '^P'   history-substring-search-up
+  bindkey '^N'   history-substring-search-down
+fi
+
 alias ll='ls -lah'
 alias la='ls -A'
 alias l='ls -CF'
@@ -374,8 +452,11 @@ clone_or_pull https://github.com/zsh-users/zsh-completions.git "$HOME/.zsh/plugi
 
 cat > "$HOME/.zsh_plugins.txt" <<'PLUGINS'
 romkatv/powerlevel10k
+zsh-users/zsh-completions
 Aloxaf/fzf-tab
 zsh-users/zsh-autosuggestions
+zdharma-continuum/fast-syntax-highlighting
+zsh-users/zsh-history-substring-search
 PLUGINS
 
 source "$HOME/.antidote/antidote.zsh"
@@ -422,11 +503,42 @@ SOCKEOF
 }
 restart_ssh
 
+# --- fail2ban (optional): ban repeated SSH auth failures on the new port ---
+if [[ "$INSTALL_FAIL2BAN" == 1 ]] && command -v fail2ban-server >/dev/null 2>&1; then
+  mkdir -p /etc/fail2ban/jail.d
+  {
+    echo "[sshd]"
+    echo "enabled  = true"
+    echo "port     = ${SSH_PORT}"
+    [[ "$INIT_SYS" == systemd ]] && echo "backend  = systemd"
+    echo "maxretry = 4"
+    echo "findtime = 10m"
+    echo "bantime  = 1h"
+  } > /etc/fail2ban/jail.d/99-bootstrap-sshd.local
+  case "$INIT_SYS" in
+    systemd)
+      systemctl enable fail2ban >/dev/null 2>&1 || true
+      systemctl restart fail2ban \
+        || echo "WARNING: fail2ban did not start (check 'journalctl -u fail2ban')." >&2
+      ;;
+    openrc)
+      rc-update add fail2ban default >/dev/null 2>&1 || true
+      rc-service fail2ban restart 2>/dev/null || rc-service fail2ban start || true
+      ;;
+    sysv)
+      service fail2ban restart 2>/dev/null || service fail2ban start || true
+      ;;
+  esac
+  echo "fail2ban: watching sshd on port ${SSH_PORT}."
+fi
+
 echo
 echo "========== DONE =========="
 echo "USER: $ADMIN_USER"
 echo "PASS: $ADMIN_PASS"
 echo "SSH:  ssh -p $SSH_PORT $ADMIN_USER@YOUR_SERVER_IP"
+[[ "$HARDEN_SSH" == 1 ]] && echo "Hardened SSH: only '$ADMIN_USER' may log in; X11/agent/TCP forwarding off; strong crypto."
+[[ "$INSTALL_FAIL2BAN" == 1 ]] && command -v fail2ban-server >/dev/null 2>&1 && echo "fail2ban: enabled on port $SSH_PORT."
 echo
 echo "Test in a NEW terminal BEFORE closing this session:"
 echo "  ssh -p $SSH_PORT $ADMIN_USER@YOUR_SERVER_IP"
