@@ -373,27 +373,36 @@ fi
 [[ -f ~/.cache/zsh/antidote.zsh ]] && source ~/.cache/zsh/antidote.zsh
 [[ -f ~/.p10k.zsh ]] && source ~/.p10k.zsh
 
-bindkey '^ ' autosuggest-accept 2>/dev/null || true
-
-zstyle ':fzf-tab:*' use-fzf-default-opts yes
-zstyle ':fzf-tab:complete:cd:*' fzf-preview 'eza -1 --color=always $realpath 2>/dev/null || ls -1 $realpath'
-
-double-esc-sudo() {
-  if [[ -z "$BUFFER" ]]; then
-    zle up-history
-  fi
-  [[ "$BUFFER" == sudo\ * ]] || BUFFER="sudo $BUFFER"
-  zle end-of-line
-}
-zle -N double-esc-sudo
-bindkey '\e\e' double-esc-sudo
-
+# Select the emacs keymap FIRST. EDITOR=vim makes zsh default to the viins
+# keymap, so any bindkey issued before this lands in the wrong keymap and does
+# nothing once emacs becomes active — that is exactly why Esc-Esc "did nothing".
+# Everything below binds into the now-active keymap.
 bindkey -e
+
+bindkey '^ ' autosuggest-accept 2>/dev/null || true
 bindkey '^A' beginning-of-line
 bindkey '^E' end-of-line
 bindkey '^U' backward-kill-line
 bindkey '^K' kill-line
 bindkey '^R' history-incremental-search-backward
+
+zstyle ':fzf-tab:*' use-fzf-default-opts yes
+zstyle ':fzf-tab:complete:cd:*' fzf-preview 'eza -1 --color=always $realpath 2>/dev/null || ls -1 $realpath'
+
+# Esc Esc: toggle `sudo` on the current line (recall last command if empty).
+# Bound into every keymap so it works regardless of emacs/vi mode.
+sudo-command-line() {
+  [[ -z $BUFFER ]] && LBUFFER="$(fc -ln -1)"
+  if [[ $BUFFER == sudo\ * ]]; then
+    LBUFFER="${LBUFFER#sudo }"
+  else
+    LBUFFER="sudo $LBUFFER"
+  fi
+}
+zle -N sudo-command-line
+bindkey -M emacs '\e\e' sudo-command-line
+bindkey -M viins '\e\e' sudo-command-line
+bindkey -M vicmd '\e\e' sudo-command-line
 
 # history-substring-search (plugin): up/down & ^P/^N search by what you've typed
 if (( $+widgets[history-substring-search-up] )); then
